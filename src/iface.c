@@ -644,8 +644,7 @@ ssize_t nd_iface_send_ns(nd_iface_t *iface, const nd_addr_t *tgt)
     (*(nd_addr_t *)&msg.ip.ip6_dst).u8[14] = tgt->u8[14];
     (*(nd_addr_t *)&msg.ip.ip6_dst).u8[15] = tgt->u8[15];
 
-    nd_lladdr_t ll_mcast = { 0x33, 0x33 };
-    *(uint32_t *)&ll_mcast.u8[2] = tgt->u32[3];
+    nd_lladdr_t ll_mcast = { 0x33, 0x33, 0xff, tgt->u8[13], tgt->u8[14], tgt->u8[15] };
 
     nd_log_trace("Write NS iface=%s, tgt=%s, src=%s", iface->name, nd_ntoa(tgt), nd_ntoa((nd_addr_t *)&msg.ip.ip6_src));
 
