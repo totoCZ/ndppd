@@ -434,12 +434,12 @@ nd_iface_t *nd_iface_open(const char *name, unsigned index)
 
     nd_lladdr_t *lladdr = (nd_lladdr_t *)ifr.ifr_hwaddr.sa_data;
 
-    /* Enable ALLMULTI. */
+    /* Enable promiscuous mode so unicast NS sent to a stale/different MAC are received. */
 
-    struct packet_mreq mreq = { .mr_ifindex = (int)index, .mr_type = PACKET_MR_ALLMULTI };
+    struct packet_mreq mreq = { .mr_ifindex = (int)index, .mr_type = PACKET_MR_PROMISC };
 
     if (setsockopt(ndL_io->fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) == -1) {
-        nd_log_error("Could not configure ALLMULTI: %s", strerror(errno));
+        nd_log_error("Could not configure promiscuous mode: %s", strerror(errno));
         return NULL;
     }
 
@@ -539,12 +539,10 @@ void nd_iface_close(nd_iface_t *iface)
         return;
 
 #ifdef __linux__
-    /* Disable ALLMULTI. */
-
-    struct packet_mreq mreq = { .mr_ifindex = (int)iface->index, .mr_type = PACKET_MR_ALLMULTI };
+    struct packet_mreq mreq = { .mr_ifindex = (int)iface->index, .mr_type = PACKET_MR_PROMISC };
 
     if (setsockopt(ndL_io->fd, SOL_PACKET, PACKET_DROP_MEMBERSHIP, &mreq, sizeof(mreq)) == -1)
-        nd_log_error("Could not disable ALLMULTI: %s", strerror(errno));
+        nd_log_error("Could not disable promiscuous mode: %s", strerror(errno));
 #else
     nd_io_close(iface->bpf_io);
 #endif
