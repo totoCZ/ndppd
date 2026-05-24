@@ -57,43 +57,52 @@ void nd_session_handle_ns(nd_session_t *session, const nd_addr_t *src, const nd_
 {
     session->ins_time = nd_current_time;
 
-    if (session->state != ND_STATE_VALID && session->state != ND_STATE_STALE) {
-        /* Bug 3 fix: src_ll may be NULL for unicast NS without SLLAO (RFC 4861 §4.3 SHOULD)
-         * or for DAD NS (unspecified source). Cannot queue a subscriber without a link-layer
-         * address to reply to — skip silently rather than crash. */
-        if (!src_ll)
-            return;
+    if (session->state == ND_STATE_VALID) {
+        nd_lladdr_t *tgt_ll = !nd_lladdr_is_unspecified(&session->rule->target) ? &session->rule->target : NULL;
 
-        nd_sub_t *sub;
-        ND_LL_SEARCH(session->subs, sub, next, nd_addr_eq(&sub->addr, src) && nd_lladdr_eq(&sub->lladdr, src_ll));
-
-        if (!sub) {
-            sub = ND_NEW(nd_sub_t);
-            sub->addr = *src;
-            sub->lladdr = *src_ll;
-            ND_LL_PREPEND(session->subs, sub, next);
+        /* DAD (unspecified source) or unicast NS without SLLAO: respond to all-nodes multicast. */
+        if (nd_addr_is_unspecified(src) || !src_ll) {
+            static const nd_lladdr_t allnodes_ll = { .u8 = { 0x33, 0x33, [5] = 1 } };
+            static const nd_addr_t allnodes = { .u8 = { 0xff, 0x02, [15] = 1 } };
+            nd_iface_send_na(session->rule->proxy->iface, &allnodes, &allnodes_ll,
+                             &session->tgt, tgt_ll, session->rule->proxy->router);
+        } else {
+            nd_iface_send_na(session->rule->proxy->iface, src, src_ll, &session->tgt, tgt_ll,
+                             session->rule->proxy->router);
         }
-
         return;
     }
 
-    nd_lladdr_t *tgt_ll = !nd_lladdr_is_unspecified(&session->rule->target) ? &session->rule->target : NULL;
+    /* INCOMPLETE, STALE, INVALID: cannot confirm reachability yet — queue the subscriber
+     * and wait for a fresh NA from the target before responding with OVERRIDE. */
+    if (!src_ll)
+        return;
 
-    /* Bug 3 fix: treat NULL src_ll (no SLLAO, or unspecified source) the same as DAD —
-     * send to all-nodes multicast since we have no unicast link-layer destination. */
-    if (nd_addr_is_unspecified(src) || !src_ll) {
-        static const nd_lladdr_t allnodes_ll = { .u8 = { 0x33, 0x33, [5] = 1 } };
-        static const nd_addr_t allnodes = { .u8 = { 0xff, 0x02, [15] = 1 } };
-        nd_iface_send_na(session->rule->proxy->iface, &allnodes, &allnodes_ll, //
-                         &session->tgt, tgt_ll, session->rule->proxy->router);
-    } else {
-        nd_iface_send_na(session->rule->proxy->iface, src, src_ll, &session->tgt, tgt_ll, session->rule->proxy->router);
+    nd_sub_t *sub;
+    ND_LL_SEARCH(session->subs, sub, next, nd_addr_eq(&sub->addr, src) && nd_lladdr_eq(&sub->lladdr, src_ll));
+
+    if (!sub) {
+        sub = ND_NEW(nd_sub_t);
+        sub->addr = *src;
+        sub->lladdr = *src_ll;
+        ND_LL_PREPEND(session->subs, sub, next);
+    }
+
+    /* STALE: trigger a fresh NUD probe if not recently sent. */
+    if (session->state == ND_STATE_STALE && session->iface &&
+        nd_current_time - session->ons_time >= nd_conf_retrans_time) {
+        if (!session->ons_count)
+            session->ons_count = 1;
+        session->ons_time = nd_current_time;
+        nd_iface_send_ns(session->iface, &session->tgt_r);
     }
 }
 
 void nd_session_handle_na(nd_session_t *session)
 {
     if (session->state == ND_STATE_VALID) {
+        /* Gratuitous NA confirms the target is still alive — refresh the VALID timer. */
+        session->state_time = nd_current_time;
         return;
     }
 
@@ -227,8 +236,12 @@ void nd_session_update(nd_session_t *session)
             if (!nd_conf_keepalive && nd_current_time - session->ins_time > nd_conf_valid_ttl)
                 break;
 
-            long time = session->ons_count && !(session->ons_count % nd_conf_retrans_limit)
-                            ? ((1 << session->ons_count / 3) * nd_conf_retrans_time)
+            int shift = session->ons_count / 3;
+            if (shift > 20)
+                shift = 20; /* cap: 2^20 * retrans_time avoids int overflow */
+            long time = session->ons_count && nd_conf_retrans_limit > 0 &&
+                                !(session->ons_count % nd_conf_retrans_limit)
+                            ? ((1 << shift) * nd_conf_retrans_time)
                             : nd_conf_retrans_time;
 
             if (nd_current_time - session->ons_time < time)

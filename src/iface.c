@@ -76,17 +76,33 @@ static void ndL_handle_ns(nd_iface_t *iface, struct ip6_hdr *ip6h, struct icmp6_
 
     struct nd_neighbor_solicit *ns = (struct nd_neighbor_solicit *)ih;
 
+    /* RFC 4861 §7.1.1: Target Address MUST NOT be a multicast address. */
+    if (nd_addr_is_multicast((nd_addr_t *)&ns->nd_ns_target))
+        return;
+
     nd_lladdr_t *src_ll = NULL;
 
     if (!nd_addr_is_unspecified((nd_addr_t *)&ip6h->ip6_src)) {
-        /* RFC 4861 §4.3: SLLAO MUST be present in multicast NS, SHOULD be present in unicast NS.
-         * SHOULD means a conforming sender may omit it; we must still process the NS.
-         * Parse SLLAO if present; leave src_ll = NULL if absent — handled downstream. */
-        if (len - sizeof(struct nd_neighbor_solicit) >= 8) {
-            struct nd_opt_hdr *opt = (struct nd_opt_hdr *)((void *)ns + sizeof(struct nd_neighbor_solicit));
+        /* RFC 4861 §4.6: MUST discard if any option has length zero.
+         * Iterate all options to find SLLAO (RFC 4861 §4.3). */
+        uint8_t *opts = (uint8_t *)ns + sizeof(struct nd_neighbor_solicit);
+        size_t opts_len = len - sizeof(struct nd_neighbor_solicit);
 
-            if (opt->nd_opt_len == 1 && opt->nd_opt_type == ND_OPT_SOURCE_LINKADDR)
-                src_ll = (nd_lladdr_t *)((void *)opt + 2);
+        while (opts_len >= 8) {
+            struct nd_opt_hdr *opt = (struct nd_opt_hdr *)opts;
+
+            if (opt->nd_opt_len == 0)
+                return; /* RFC 4861 §4.6: discard entire packet */
+
+            size_t opt_bytes = (size_t)opt->nd_opt_len * 8;
+            if (opt_bytes > opts_len)
+                break; /* truncated option — stop parsing */
+
+            if (opt->nd_opt_type == ND_OPT_SOURCE_LINKADDR && opt->nd_opt_len == 1)
+                src_ll = (nd_lladdr_t *)(opts + 2);
+
+            opts += opt_bytes;
+            opts_len -= opt_bytes;
         }
 
         /* RFC 4861 §7.7.3: NUD unicast NS SHOULD omit SLLAO since the sender already knows the
@@ -276,19 +292,20 @@ static void ndL_io_handler(nd_io_t *io, __attribute__((unused)) int events)
 
         for (size_t i = 0; i < (size_t)len;) {
             struct bpf_hdr *bpf_hdr = (struct bpf_hdr *)(buf + i);
+            size_t pkt_offset = i + bpf_hdr->bh_hdrlen;
             i += BPF_WORDALIGN(bpf_hdr->bh_hdrlen + bpf_hdr->bh_caplen);
 
             if (bpf_hdr->bh_caplen < sizeof(ndL_ip6_msg_t)) {
                 continue;
             }
 
-            ndL_ip6_msg_t *msg = (ndL_ip6_msg_t *)buf;
+            ndL_ip6_msg_t *msg = (ndL_ip6_msg_t *)(buf + pkt_offset);
 
             if (msg->eh.ether_type != ntohs(ETHERTYPE_IPV6)) {
                 continue;
             }
 
-            if (ntohs(msg->ip6h.ip6_plen) != len - sizeof(ndL_ip6_msg_t)) {
+            if (ntohs(msg->ip6h.ip6_plen) != bpf_hdr->bh_caplen - sizeof(ndL_ip6_msg_t)) {
                 continue;
             }
 
