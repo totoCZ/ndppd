@@ -569,10 +569,12 @@ void nd_iface_close(nd_iface_t *iface)
         return;
 
 #ifdef __linux__
-    struct packet_mreq mreq = { .mr_ifindex = (int)iface->index, .mr_type = PACKET_MR_PROMISC };
+    if (!nd_iface_no_restore_flags) {
+        struct packet_mreq mreq = { .mr_ifindex = (int)iface->index, .mr_type = PACKET_MR_PROMISC };
 
-    if (setsockopt(ndL_io->fd, SOL_PACKET, PACKET_DROP_MEMBERSHIP, &mreq, sizeof(mreq)) == -1)
-        nd_log_error("Could not disable promiscuous mode: %s", strerror(errno));
+        if (setsockopt(ndL_io->fd, SOL_PACKET, PACKET_DROP_MEMBERSHIP, &mreq, sizeof(mreq)) == -1)
+            nd_log_error("Could not disable promiscuous mode: %s", strerror(errno));
+    }
 #else
     nd_io_close(iface->bpf_io);
 #endif
