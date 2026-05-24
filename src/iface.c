@@ -68,17 +68,23 @@ typedef struct __attribute__((packed)) {
 static void ndL_handle_ns(nd_iface_t *iface, struct ip6_hdr *ip6h, struct icmp6_hdr *ih, size_t len,
                           const nd_lladdr_t *eth_src)
 {
-    if (!iface->proxy)
+    if (!iface->proxy) {
+        nd_log_trace("%s: NS on non-proxy iface, drop", iface->name);
         return;
+    }
 
-    if (len < sizeof(struct nd_neighbor_solicit))
+    if (len < sizeof(struct nd_neighbor_solicit)) {
+        nd_log_debug("%s: NS too short (%zu), drop", iface->name, len);
         return;
+    }
 
     struct nd_neighbor_solicit *ns = (struct nd_neighbor_solicit *)ih;
 
     /* RFC 4861 §7.1.1: Target Address MUST NOT be a multicast address. */
-    if (nd_addr_is_multicast((nd_addr_t *)&ns->nd_ns_target))
+    if (nd_addr_is_multicast((nd_addr_t *)&ns->nd_ns_target)) {
+        nd_log_debug("%s: NS target is multicast, drop", iface->name);
         return;
+    }
 
     nd_lladdr_t *src_ll = NULL;
 
@@ -128,8 +134,10 @@ static void ndL_handle_na(nd_iface_t *iface, struct icmp6_hdr *ih, size_t len)
 
     nd_session_t *session = nd_session_find_r((nd_addr_t *)&na->nd_na_target, iface);
 
-    if (!session)
+    if (!session) {
+        nd_log_trace("%s: NA for %s has no matching session, drop", iface->name, nd_ntoa((nd_addr_t *)&na->nd_na_target));
         return;
+    }
 
     nd_session_handle_na(session);
 }
@@ -197,32 +205,44 @@ static void ndL_handle_msg(nd_iface_t *iface, ndL_ip6_msg_t *msg)
     size_t i = 0;
 
     if (msg->ip6h.ip6_nxt == IPPROTO_HOPOPTS) {
-        /* We're gonna skip through hop-by-hop option. */
         struct ip6_hbh *hbh = (void *)(msg + 1) + i;
 
-        if (plen - i < 8 || plen - i < 8U + (hbh->ip6h_len * 8U))
+        if (plen - i < 8 || plen - i < 8U + (hbh->ip6h_len * 8U)) {
+            nd_log_debug("%s: truncated hop-by-hop header, drop", iface->name);
             return;
+        }
 
         i += 8 + 8 * hbh->ip6h_len;
 
-        if (hbh->ip6h_nxt != IPPROTO_ICMPV6)
+        if (hbh->ip6h_nxt != IPPROTO_ICMPV6) {
+            nd_log_trace("%s: hbh nxt=%d != ICMPv6, drop", iface->name, hbh->ip6h_nxt);
             return;
+        }
     } else if (msg->ip6h.ip6_nxt != IPPROTO_ICMPV6) {
+        nd_log_trace("%s: nxt=%d != ICMPv6, drop", iface->name, msg->ip6h.ip6_nxt);
         return;
     }
 
-    if (plen - i < sizeof(struct icmp6_hdr))
+    if (plen - i < sizeof(struct icmp6_hdr)) {
+        nd_log_debug("%s: ICMPv6 header truncated, drop", iface->name);
         return;
+    }
 
     struct icmp6_hdr *ih = (struct icmp6_hdr *)((void *)(msg + 1) + i);
     uint16_t ilen = plen - i;
 
-    if (ndL_calculate_icmp6_checksum(&msg->ip6h, ih, ilen) != ih->icmp6_cksum)
+    if (ndL_calculate_icmp6_checksum(&msg->ip6h, ih, ilen) != ih->icmp6_cksum) {
+        nd_log_debug("%s: ICMPv6 checksum mismatch (got %04x want %04x), drop",
+                     iface->name, ntohs(ih->icmp6_cksum),
+                     ntohs(ndL_calculate_icmp6_checksum(&msg->ip6h, ih, ilen)));
         return;
+    }
 
     /* RFC 4861 §6.1.1: hop limit MUST be 255 — reject anything that may have been forwarded. */
-    if (msg->ip6h.ip6_hops != 255)
+    if (msg->ip6h.ip6_hops != 255) {
+        nd_log_debug("%s: hop limit %d != 255, drop", iface->name, msg->ip6h.ip6_hops);
         return;
+    }
 
     if (ih->icmp6_type == ND_NEIGHBOR_SOLICIT)
         ndL_handle_ns(iface, &msg->ip6h, ih, ilen, (nd_lladdr_t *)msg->eh.ether_shost);
@@ -257,20 +277,30 @@ static void ndL_io_handler(nd_io_t *io, __attribute__((unused)) int events)
 
         ND_LL_SEARCH(ndL_first_iface, iface, next, iface->index == (unsigned int)lladdr.sll_ifindex);
 
-        if (!iface)
+        if (!iface) {
+            nd_log_trace("pkt on unknown ifindex %d, skip", lladdr.sll_ifindex);
             continue;
+        }
 
-        if ((size_t)len < sizeof(ndL_ip6_msg_t))
+        if ((size_t)len < sizeof(ndL_ip6_msg_t)) {
+            nd_log_trace("pkt too short (%zd) on %s, skip", len, iface->name);
             continue;
+        }
 
         ndL_ip6_msg_t *msg = (ndL_ip6_msg_t *)buf;
 
-        if (msg->eh.ether_type != ntohs(ETHERTYPE_IPV6))
+        if (msg->eh.ether_type != ntohs(ETHERTYPE_IPV6)) {
+            nd_log_trace("non-IPv6 ethertype 0x%04x on %s, skip", ntohs(msg->eh.ether_type), iface->name);
             continue;
+        }
 
-        if (ntohs(msg->ip6h.ip6_plen) != len - sizeof(ndL_ip6_msg_t))
+        if (ntohs(msg->ip6h.ip6_plen) != len - sizeof(ndL_ip6_msg_t)) {
+            nd_log_trace("plen mismatch on %s (plen=%u frame=%zd), skip",
+                         iface->name, ntohs(msg->ip6h.ip6_plen), len - sizeof(ndL_ip6_msg_t));
             continue;
+        }
 
+        nd_log_trace("pkt len=%zd on %s pkttype=%d", len, iface->name, lladdr.sll_pkttype);
         ndL_handle_msg(iface, msg);
     }
 }

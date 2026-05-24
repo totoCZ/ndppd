@@ -75,8 +75,11 @@ void nd_session_handle_ns(nd_session_t *session, const nd_addr_t *src, const nd_
 
     /* INCOMPLETE, STALE, INVALID: cannot confirm reachability yet — queue the subscriber
      * and wait for a fresh NA from the target before responding with OVERRIDE. */
-    if (!src_ll)
+    if (!src_ll) {
+        nd_log_debug("session %s %s: no src_ll (DAD/no SLLAO) and state=%d, drop NS",
+                     session->rule->proxy->ifname, nd_ntoa(&session->tgt), session->state);
         return;
+    }
 
     nd_sub_t *sub;
     ND_LL_SEARCH(session->subs, sub, next, nd_addr_eq(&sub->addr, src) && nd_lladdr_eq(&sub->lladdr, src_ll));
