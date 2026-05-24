@@ -204,6 +204,10 @@ static void ndL_handle_msg(nd_iface_t *iface, ndL_ip6_msg_t *msg)
     if (ndL_calculate_icmp6_checksum(&msg->ip6h, ih, ilen) != ih->icmp6_cksum)
         return;
 
+    /* RFC 4861 §6.1.1: hop limit MUST be 255 — reject anything that may have been forwarded. */
+    if (msg->ip6h.ip6_hops != 255)
+        return;
+
     if (ih->icmp6_type == ND_NEIGHBOR_SOLICIT)
         ndL_handle_ns(iface, &msg->ip6h, ih, ilen, (nd_lladdr_t *)msg->eh.ether_shost);
     else if (ih->icmp6_type == ND_NEIGHBOR_ADVERT)
