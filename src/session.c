@@ -88,6 +88,23 @@ void nd_session_handle_ns(nd_session_t *session, const nd_addr_t *src, const nd_
         ND_LL_PREPEND(session->subs, sub, next);
     }
 
+    /* INVALID with no iface: route was missing at session creation. Re-check now — if the
+     * container's route has appeared in the meantime, open the interface and start probing. */
+    if (session->state == ND_STATE_INVALID && !session->iface) {
+        nd_rule_t *rule = session->rule;
+        if (rule->mode == ND_MODE_AUTO) {
+            nd_rt_route_t *route = nd_rt_find_route(&session->tgt, rule->table);
+            if (route && route->oif != rule->proxy->iface->index &&
+                (session->iface = nd_iface_open(NULL, route->oif))) {
+                session->state = ND_STATE_INCOMPLETE;
+                session->state_time = nd_current_time;
+                session->ons_count = 1;
+                session->ons_time = nd_current_time;
+                nd_iface_send_ns(session->iface, &session->tgt_r);
+            }
+        }
+    }
+
     /* STALE: trigger a fresh NUD probe if not recently sent. */
     if (session->state == ND_STATE_STALE && session->iface &&
         nd_current_time - session->ons_time >= nd_conf_retrans_time) {
