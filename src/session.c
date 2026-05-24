@@ -27,7 +27,6 @@ extern int nd_conf_renew;
 extern int nd_conf_retrans_limit;
 extern int nd_conf_retrans_time;
 extern bool nd_conf_keepalive;
-extern bool nd_conf_use_kernel;
 
 #ifndef NDPPD_SESSION_BUCKETS
 #    define NDPPD_SESSION_BUCKETS 64
@@ -44,12 +43,6 @@ static void ndL_up(nd_session_t *session)
         nd_rt_add_route(&session->tgt, 128, session->iface->index, session->rule->table);
         session->autowired = true;
     }
-
-    if (nd_conf_use_kernel) {
-        nd_log_debug("session [%s] add kernel neighbor proxy for %s", //
-                     session->rule->proxy->ifname, nd_ntoa(&session->tgt));
-        nd_rt_add_neigh(&session->tgt, session->rule->proxy->iface->index);
-    }
 }
 
 static void ndL_down(nd_session_t *session)
@@ -58,12 +51,6 @@ static void ndL_down(nd_session_t *session)
         nd_rt_remove_route(&session->tgt, 128, session->rule->table);
         session->autowired = false;
     }
-
-    if (nd_conf_use_kernel) {
-        nd_log_debug("session [%s] removing kernel neighbor proxy for %s", //
-                     session->rule->proxy->ifname, nd_ntoa(&session->tgt));
-        nd_rt_remove_neigh(&session->tgt, session->rule->proxy->iface->index);
-    }
 }
 
 void nd_session_handle_ns(nd_session_t *session, const nd_addr_t *src, const nd_lladdr_t *src_ll)
@@ -71,6 +58,10 @@ void nd_session_handle_ns(nd_session_t *session, const nd_addr_t *src, const nd_
     session->ins_time = nd_current_time;
 
     if (session->state != ND_STATE_VALID && session->state != ND_STATE_STALE) {
+        /* src_ll may be NULL for DAD NS (unspecified source); cannot queue without a reply address. */
+        if (!src_ll)
+            return;
+
         nd_sub_t *sub;
         ND_LL_SEARCH(session->subs, sub, next, nd_addr_eq(&sub->addr, src) && nd_lladdr_eq(&sub->lladdr, src_ll));
 
@@ -86,7 +77,7 @@ void nd_session_handle_ns(nd_session_t *session, const nd_addr_t *src, const nd_
 
     nd_lladdr_t *tgt_ll = !nd_lladdr_is_unspecified(&session->rule->target) ? &session->rule->target : NULL;
 
-    if (nd_addr_is_unspecified(src)) {
+    if (nd_addr_is_unspecified(src) || !src_ll) {
         static const nd_lladdr_t allnodes_ll = { .u8 = { 0x33, 0x33, [5] = 1 } };
         static const nd_addr_t allnodes = { .u8 = { 0xff, 0x02, [15] = 1 } };
         nd_iface_send_na(session->rule->proxy->iface, &allnodes, &allnodes_ll, //

@@ -65,7 +65,8 @@ typedef struct __attribute__((packed)) {
     struct ip6_hdr ip6h;
 } ndL_ip6_msg_t;
 
-static void ndL_handle_ns(nd_iface_t *iface, struct ip6_hdr *ip6h, struct icmp6_hdr *ih, size_t len)
+static void ndL_handle_ns(nd_iface_t *iface, struct ip6_hdr *ip6h, struct icmp6_hdr *ih, size_t len,
+                          const nd_lladdr_t *eth_src)
 {
     if (!iface->proxy)
         return;
@@ -78,18 +79,22 @@ static void ndL_handle_ns(nd_iface_t *iface, struct ip6_hdr *ip6h, struct icmp6_
     nd_lladdr_t *src_ll = NULL;
 
     if (!nd_addr_is_unspecified((nd_addr_t *)&ip6h->ip6_src)) {
-        // FIXME: Source link-layer address MUST be included in multicast solicitations and SHOULD be included in
-        //        unicast solicitations. [https://tools.ietf.org/html/rfc4861#section-4.3].
+        /* RFC 4861 §4.3: SLLAO MUST be present in multicast NS, SHOULD be present in unicast NS.
+         * SHOULD means a conforming sender may omit it; we must still process the NS.
+         * Parse SLLAO if present; leave src_ll = NULL if absent — handled downstream. */
+        if (len - sizeof(struct nd_neighbor_solicit) >= 8) {
+            struct nd_opt_hdr *opt = (struct nd_opt_hdr *)((void *)ns + sizeof(struct nd_neighbor_solicit));
 
-        if (len - sizeof(struct nd_neighbor_solicit) < 8)
-            return;
+            if (opt->nd_opt_len == 1 && opt->nd_opt_type == ND_OPT_SOURCE_LINKADDR)
+                src_ll = (nd_lladdr_t *)((void *)opt + 2);
+        }
 
-        struct nd_opt_hdr *opt = (struct nd_opt_hdr *)((void *)ns + sizeof(struct nd_neighbor_solicit));
-
-        if (opt->nd_opt_len != 1 || opt->nd_opt_type != ND_OPT_SOURCE_LINKADDR)
-            return;
-
-        src_ll = (nd_lladdr_t *)((void *)opt + 2);
+        /* RFC 4861 §7.7.3: NUD unicast NS SHOULD omit SLLAO since the sender already knows the
+         * link-layer address.  Fall back to the Ethernet source MAC so we can send a solicited NA
+         * (SOLICITED=1) back to the probe sender — an unsolicited NA (SOLICITED=0) does not
+         * satisfy a NUD PROBE transition per §7.3.5. */
+        if (!src_ll)
+            src_ll = (nd_lladdr_t *)eth_src;
     }
 
     nd_proxy_handle_ns(iface->proxy, (nd_addr_t *)&ip6h->ip6_src, (nd_addr_t *)&ip6h->ip6_dst,
@@ -200,7 +205,7 @@ static void ndL_handle_msg(nd_iface_t *iface, ndL_ip6_msg_t *msg)
         return;
 
     if (ih->icmp6_type == ND_NEIGHBOR_SOLICIT)
-        ndL_handle_ns(iface, &msg->ip6h, ih, ilen);
+        ndL_handle_ns(iface, &msg->ip6h, ih, ilen, (nd_lladdr_t *)msg->eh.ether_shost);
     else if (ih->icmp6_type == ND_NEIGHBOR_ADVERT)
         ndL_handle_na(iface, ih, ilen);
     else if (ih->icmp6_type == MLD_LISTENER_QUERY)
